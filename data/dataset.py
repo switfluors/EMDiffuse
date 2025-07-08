@@ -48,52 +48,98 @@ def invert(tensor):
     return 1 - tensor
 
 
+import os
+import random
+import numpy as np
+from torch.utils import data
+from torchvision import transforms
+from PIL import Image, ImageOps, ImageFilter
+import tifffile
+import torch
+
+
+def pil_loader(path):
+    """Custom loader that reads uint16 TIFF and converts to PIL Image scaled to [0, 255] (as float32)"""
+    img = tifffile.imread(path).astype(np.float32) / 65535.0  # Normalize to [0, 1]
+    img = (img * 255).clip(0, 255).astype(np.uint8)  # Rescale to [0, 255] for PIL compatibility
+    return Image.fromarray(img)
+
+
 class EMDiffusenDataset(data.Dataset):  # Denoise and super-resolution Dataset
-    def __init__(self, data_root, data_len=-1, norm=True, percent=False, phase='train', image_size=[256, 256],
+    def __init__(self, data_root, data_len=-1, norm=True, percent=False, phase='train', image_size=[128, 16],
                  loader=pil_loader):
         self.data_root = data_root
         self.phase = phase
         self.img_paths, self.gt_paths = self.read_dataset(self.data_root)
+        print(f"[EMDiffusenDataset] Loaded {len(self.img_paths)} image pairs from {data_root}")
+
+        # PIL-based transforms after .tif loading & float scaling
         self.tfs = transforms.Compose([
-            transforms.Resize((image_size[0], image_size[1])),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.5], std=[0.5])
+            transforms.ToTensor(),  # Converts to [0,1] float32 tensor
+            transforms.Normalize(mean=[0.5], std=[0.5])  # Normalize to [-1,1]
         ])
+
         self.loader = loader
         self.norm = norm
         self.image_size = image_size
+        print(f"[EMDiffusenDataset] Phase: {self.phase}, Normalization: {self.norm}, Resize to: {image_size}")
 
     def __getitem__(self, index):
         ret = {}
         file_name = self.img_paths[index]
         gt_file_name = self.gt_paths[index]
+
+        # img_before = np.array(self.loader(file_name))  # Load original input image (PIL)
+        # img_after = self.tfs(self.loader(file_name)).numpy()  # After transforms
+        #
+        # import matplotlib.pyplot as plt
+        # plt.figure(figsize=(10, 4))
+        # plt.subplot(1, 2, 1)
+        # plt.title("Original input")
+        # plt.imshow(img_before, cmap='gray')
+        # plt.subplot(1, 2, 2)
+        # plt.title("Transformed input")
+        # plt.imshow(img_after.squeeze(), cmap='gray')
+        # plt.show()
+
+        # Load as PIL images (uint8 scaled from float)
         img = self.loader(file_name)
         gt = self.loader(gt_file_name)
-        if self.phase == 'train':
-            img, gt = self.aug(img, gt)
+
+        print(f"[EMDiffusenDataset][{index}] Loaded input image: {file_name}, GT image: {gt_file_name}")
+        print(f"[EMDiffusenDataset][{index}] Raw input size: {img.size}, GT size: {gt.size}")
+
+        # Optional augmentations (flip, rotate, blur)
+        # if self.phase == 'train':
+        #     img, gt = self.aug(img, gt)
+
+        # Apply resizing and normalization transforms
         img = self.tfs(img)
         gt = self.tfs(gt)
+
+        print(f"[EMDiffusenDataset][{index}] Tensor input shape: {img.shape}, GT shape: {gt.shape}")
+
         ret['gt_image'] = gt
         ret['cond_image'] = img
-        ret['path'] = '_'.join(file_name.split(os.sep)[-3:])
+        ret['path'] = '_'.join(file_name.split(os.sep)[-3:])  # e.g., 0_Spec__4w_04_123.tif
+
         return ret
 
     def __len__(self):
         return len(self.img_paths)
 
-    def aug(self, img, gt):
-        if random.random() < 0.5:
-            img = ImageOps.flip(img)
-            gt = ImageOps.flip(gt)
-        if random.random() < 0.5:
-            img = img.rotate(90)
-            gt = gt.rotate(90)
-        if random.random() < 0.5:
-            img = img.filter(ImageFilter.GaussianBlur(radius=3))
-        return img, gt
+    # def aug(self, img, gt):
+    #     if random.random() < 0.5:
+    #         img = ImageOps.flip(img)
+    #         gt = ImageOps.flip(gt)
+    #     if random.random() < 0.5:
+    #         img = img.rotate(90)
+    #         gt = gt.rotate(90)
+    #     if random.random() < 0.5:
+    #         img = img.filter(ImageFilter.GaussianBlur(radius=3))
+    #     return img, gt
 
     def read_dataset(self, data_root):
-        import os
         img_paths = []
         gt_paths = []
         for cell_num in os.listdir(data_root):
@@ -103,8 +149,16 @@ class EMDiffusenDataset(data.Dataset):  # Denoise and super-resolution Dataset
             for noise_level in os.listdir(cell_path):
                 for img in sorted(os.listdir(os.path.join(cell_path, noise_level))):
                     if 'tif' in img:
-                        img_paths.append(os.path.join(cell_path, noise_level, img))
-                        gt_paths.append(os.path.join(cell_path, noise_level, img).replace('wf', 'gt'))
+                        img_path = os.path.join(cell_path, noise_level, img)
+                        gt_path = img_path.replace('wf', 'gt')
+
+                        print(f"Input: {img_path}")
+                        print(f"GT:    {gt_path}")
+
+                        img_paths.append(img_path)
+                        gt_paths.append(gt_path)
+
+        print(f"Total image pairs collected: {len(img_paths)}")
         return img_paths, gt_paths
 
 

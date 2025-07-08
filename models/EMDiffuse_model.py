@@ -80,6 +80,8 @@ class DiReP(BaseModel):
         self.path = data['path']
         self.batch_size = len(data['path'])
 
+        print(f"[set_input] cond_image shape: {self.cond_image.shape}, gt_image shape: {self.gt_image.shape}")
+
     def get_current_visuals(self, phase='train'):
         dict = {
             'gt_image': (self.gt_image.detach()[:].float().cpu() + 1) / 2,
@@ -92,22 +94,48 @@ class DiReP(BaseModel):
 
         return dict
 
+    # def save_current_results(self):
+    #     ret_path = []
+    #     ret_result = []
+    #     for idx in range(self.batch_size):
+    #         ret_path.append('GT_{}'.format(self.path[idx]))
+    #         ret_result.append(self.gt_image[idx].detach().float().cpu())
+    #         ret_path.append('Out_{}'.format(self.path[idx]))
+    #         ret_result.append(self.output[idx].detach().float().cpu())
+    #         ret_path.append('Input_{}'.format(self.path[idx]))
+    #         ret_result.append(self.cond_image[idx].detach().float().cpu())
+    #         if self.mean > 1:
+    #             for output_index in range(len(self.outputs)):
+    #                 ret_path.append('Out_round{}_{}'.format(output_index, self.path[idx]))
+    #                 ret_result.append(self.outputs[output_index][idx].detach().float().cpu())
+    #     self.results_dict = self.results_dict._replace(name=ret_path, result=ret_result)
+    #     return self.results_dict._asdict()
+
     def save_current_results(self):
         ret_path = []
         ret_result = []
+
+        def prepare_image(tensor):
+            if tensor.ndim == 3 and tensor.shape[0] == 1:
+                tensor = tensor.squeeze(0)
+            return tensor.cpu()  # no .numpy() here
+
         for idx in range(self.batch_size):
-            ret_path.append('GT_{}'.format(self.path[idx]))
-            ret_result.append(self.gt_image[idx].detach().float().cpu())
-            ret_path.append('Out_{}'.format(self.path[idx]))
-            ret_result.append(self.output[idx].detach().float().cpu())
-            ret_path.append('Input_{}'.format(self.path[idx]))
-            ret_result.append(self.cond_image[idx].detach().float().cpu())
-            if self.mean > 1:
+            ret_path.append(f'GT_{self.path[idx]}')
+            ret_result.append(prepare_image(self.gt_image[idx]))
+
+            ret_path.append(f'Out_{self.path[idx]}')
+            ret_result.append(prepare_image(self.output[idx]))
+
+            ret_path.append(f'Input_{self.path[idx]}')
+            ret_result.append(prepare_image(self.cond_image[idx]))
+
+            if hasattr(self, 'outputs') and isinstance(self.outputs, list) and self.outputs and self.mean > 1:
                 for output_index in range(len(self.outputs)):
-                    ret_path.append('Out_round{}_{}'.format(output_index, self.path[idx]))
-                    ret_result.append(self.outputs[output_index][idx].detach().float().cpu())
-        self.results_dict = self.results_dict._replace(name=ret_path, result=ret_result)
-        return self.results_dict._asdict()
+                    ret_path.append(f'Out_round{output_index}_{self.path[idx]}')
+                    ret_result.append(prepare_image(self.outputs[output_index][idx]))
+
+        return {'name': ret_path, 'result': ret_result}
 
     def train_step(self):
         self.netG.train()
@@ -115,24 +143,32 @@ class DiReP(BaseModel):
         for train_data in self.phase_loader:
             self.set_input(train_data)
             self.optG.zero_grad()
+
+            print("[train_step] Running model forward pass...")
             loss = self.netG(self.gt_image, self.cond_image, mask=self.mask)
+            print(f"[train_step] Loss value: {loss.item():.6f}")
+
             loss.backward()
             self.optG.step()
 
             self.iter += self.batch_size
             self.writer.set_iter(self.epoch, self.iter, phase='train')
             self.train_metrics.update(self.loss_fn.__name__, loss.item())
+
             if self.iter % self.opt['train']['log_iter'] == 0:
                 for key, value in self.train_metrics.result().items():
                     self.logger.info('{:5s}: {}\t'.format(str(key), value))
-                    print('{:5s}: {}\t'.format(str(key), value))
+                    print(f"[train_step][LOG] {key}: {value}")
                     self.writer.add_scalar(key, value)
+
             if self.ema_scheduler is not None:
                 if self.iter > self.ema_scheduler['ema_start'] and self.iter % self.ema_scheduler['ema_iter'] == 0:
+                    print(f"[EMA] Updating model average at iter {self.iter}")
                     self.EMA.update_model_average(self.netG_EMA, self.netG)
 
         for scheduler in self.schedulers:
             scheduler.step()
+
         return self.train_metrics.result()
 
     def val_step(self):
@@ -141,13 +177,16 @@ class DiReP(BaseModel):
         with torch.no_grad():
             for val_data in tqdm.tqdm(self.val_loader):
                 self.set_input(val_data)
+
+                print("[val_step] Restoring image...")
                 if self.opt['distributed']:
-                    self.output, self.visuals = self.netG.module.restoration(self.cond_image,
-                                                                             sample_num=self.sample_num,
-                                                                             y_0=self.gt_image)
+                    self.output, self.visuals = self.netG.module.restoration(
+                        self.cond_image, sample_num=self.sample_num, y_0=self.gt_image)
                 else:
-                    self.output, self.visuals = self.netG.restoration(self.cond_image, sample_num=self.sample_num,
-                                                                      y_0=self.gt_image)
+                    self.output, self.visuals = self.netG.restoration(
+                        self.cond_image, sample_num=self.sample_num, y_0=self.gt_image)
+
+                print(f"[val_step] Output shape: {self.output.shape}")
 
                 self.iter += self.batch_size
                 self.writer.set_iter(self.epoch, self.iter, phase='val')
@@ -156,9 +195,14 @@ class DiReP(BaseModel):
                     key = met.__name__
                     value = met(self.gt_image, self.output)
                     self.val_metrics.update(key, value)
+                    print(f"[val_step] Metric - {key}: {value}")
                     self.writer.add_scalar(key, value)
+
                 for key, value in self.get_current_visuals(phase='val').items():
+                    print(f"[val_step] Logging visuals for: {key}")
                     self.writer.add_images(key, value)
+
+                print("[val_step] Saving images...")
                 self.writer.save_images(self.save_current_results(), norm=self.opt['norm'])
 
         return self.val_metrics.result()
@@ -180,32 +224,42 @@ class DiReP(BaseModel):
             for phase_data in self.phase_loader:
                 self.set_input(phase_data)
                 self.outputs = []
+
                 for i in range(self.mean):
+                    print(f"[test] Sampling round {i + 1}/{self.mean}...")
                     output = self.model_test(self.sample_num)
+                    print(f"[test] Output shape (round {i + 1}): {output.shape}")
                     self.outputs.append(output)
+
                 if self.mean > 1:
+                    print("[test] Averaging predictions and computing uncertainty...")
                     self.output = torch.stack(self.outputs, dim=0).mean(dim=0)
                     self.model_uncertainty = torch.stack(self.outputs, dim=0).std(dim=0)
                 else:
                     self.output = self.outputs[0]
                     self.model_uncertainty = torch.zeros_like(self.output)
+
                 self.iter += self.batch_size
                 self.writer.set_iter(self.epoch, self.iter, phase='test')
+
                 for met in self.metrics:
                     key = met.__name__
                     value = met(self.gt_image, self.output)
                     self.test_metrics.update(key, value)
+                    print(f"[test] Metric - {key}: {value}")
                     self.writer.add_scalar(key, value)
+
                 for key, value in self.get_current_visuals(phase='test').items():
+                    print(f"[test] Writing visuals: {key}")
                     self.writer.add_images(key, value)
+
+                print("[test] Saving test results...")
                 self.writer.save_images(self.save_current_results(), norm=self.opt['norm'])
 
         test_log = self.test_metrics.result()
-        ''' save logged informations into log dict '''
         test_log.update({'epoch': self.epoch, 'iters': self.iter})
-
-        ''' print logged informations to the screen and tensorboard '''
         for key, value in test_log.items():
+            print(f"[test][LOG] {key}: {value}")
             self.logger.info('{:5s}: {}\t'.format(str(key), value))
 
     def load_networks(self):

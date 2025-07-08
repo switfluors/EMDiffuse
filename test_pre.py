@@ -40,7 +40,7 @@ def test_pre(data_root, task='denoise'):
     mkdir(target_path)
     if task == 'denoise':
         image_types = ['Brain__4w_04.tif', 'Brain__4w_05.tif', 'Brain__4w_06.tif', 'Brain__4w_07.tif',
-                       'Brain__4w_08.tif']
+                       'Brain__4w_08.tif', 'Brain__4w_09.tif']
     else:
         image_types = ['Brain__2w_01.tif', 'Brain__2w_02.tif', 'Brain__2w_03.tif']
     for region_index in os.listdir(data_root):

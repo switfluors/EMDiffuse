@@ -23,24 +23,23 @@ class Network(BaseNetwork):
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         to_torch = partial(torch.tensor, dtype=torch.float32, device=device)
         betas = make_beta_schedule(**self.beta_schedule[phase])
-        betas = betas.detach().cpu().numpy() if isinstance(
-            betas, torch.Tensor) else betas
+        betas = betas.detach().cpu().numpy() if isinstance(betas, torch.Tensor) else betas
         alphas = 1. - betas
 
         timesteps, = betas.shape
         self.num_timesteps = int(timesteps)
 
+        print(f"[NoiseSchedule] Phase: {phase}")
+        print(f"[NoiseSchedule] Num timesteps: {self.num_timesteps}")
+        print(f"[NoiseSchedule] Beta range: min={np.min(betas):.4e}, max={np.max(betas):.4e}")
+
         gammas = np.cumprod(alphas, axis=0)
         gammas_prev = np.append(1., gammas[:-1])
 
-        # calculations for diffusion q(x_t | x_{t-1}) and others
         self.register_buffer('gammas', to_torch(gammas))
         self.register_buffer('sqrt_recip_gammas', to_torch(np.sqrt(1. / gammas)))
         self.register_buffer('sqrt_recipm1_gammas', to_torch(np.sqrt(1. / gammas - 1)))
-
-        # calculations for posterior q(x_{t-1} | x_t, x_0)
         posterior_variance = betas * (1. - gammas_prev) / (1. - gammas)
-        # below: log calculation clipped because the posterior variance is 0 at the beginning of the diffusion chain
         self.register_buffer('posterior_log_variance_clipped', to_torch(np.log(np.maximum(posterior_variance, 1e-20))))
         self.register_buffer('posterior_mean_coef1', to_torch(betas * np.sqrt(gammas_prev) / (1. - gammas)))
         self.register_buffer('posterior_mean_coef2', to_torch((1. - gammas_prev) * np.sqrt(alphas) / (1. - gammas)))
@@ -61,17 +60,21 @@ class Network(BaseNetwork):
 
     def p_mean_variance(self, y_t, t, clip_denoised: bool, y_cond=None):
         noise_level = extract(self.gammas, t, x_shape=(1, 1)).to(y_t.device)
-        y_0_hat = self.predict_start_from_noise(
-            y_t, t=t, noise=self.denoise_fn(torch.cat([y_cond, y_t], dim=1), noise_level))
+        unet_input = torch.cat([y_cond, y_t], dim=1)
+        predicted_noise = self.denoise_fn(unet_input, noise_level)
+        y_0_hat = self.predict_start_from_noise(y_t, t=t, noise=predicted_noise)
 
-        if clip_denoised:  # todo: clip
+        if clip_denoised:
             if self.norm:
                 y_0_hat.clamp_(-1., 1.)
             else:
                 y_0_hat.clamp_(0., 1.)
 
-        model_mean, posterior_log_variance = self.q_posterior(
-            y_0_hat=y_0_hat, y_t=y_t, t=t)
+        model_mean, posterior_log_variance = self.q_posterior(y_0_hat=y_0_hat, y_t=y_t, t=t)
+
+        # print(f"[p_mean_variance] t={t[0].item()}, y_t shape: {y_t.shape}, y_0_hat shape: {y_0_hat.shape}")
+        # print(f"[p_mean_variance] model_mean shape: {model_mean.shape}, log_variance shape: {posterior_log_variance.shape}")
+
         return model_mean, posterior_log_variance, y_0_hat
 
     def q_sample(self, y_0, sample_gammas, noise=None):
@@ -87,55 +90,70 @@ class Network(BaseNetwork):
             y_t=y_t, t=t, clip_denoised=clip_denoised, y_cond=y_cond)
 
         noise = torch.randn_like(y_t) if any(t > 0) else torch.zeros_like(y_t)
-        if adjust:
-            if t[0] < (self.num_timesteps * 0.2):
-                mean_diff = model_mean.view(model_mean.size(0), -1).mean(1) - y_cond.view(y_cond.size(0), -1).mean(1)
-                mean_diff = mean_diff.view(model_mean.size(0), 1, 1, 1)
-                model_mean = model_mean - 0.5 * mean_diff.repeat(
-                    (1, model_mean.shape[1], model_mean.shape[2], model_mean.shape[3]))
+
+        if adjust and t[0] < (self.num_timesteps * 0.2):
+            mean_diff = model_mean.view(model_mean.size(0), -1).mean(1) - y_cond.view(y_cond.size(0), -1).mean(1)
+            mean_diff = mean_diff.view(model_mean.size(0), 1, 1, 1)
+            model_mean -= 0.5 * mean_diff.repeat(1, model_mean.shape[1], model_mean.shape[2], model_mean.shape[3])
+
+        # print(f"[p_sample] t={t[0].item()}, model_mean shape: {model_mean.shape}, y_0_hat shape: {y_0_hat.shape}")
+
         return model_mean + noise * (0.5 * model_log_variance).exp(), y_0_hat
 
     @torch.no_grad()
     def restoration(self, y_cond, y_t=None, y_0=None, mask=None, sample_num=8, adjust=False):
         b, *_ = y_cond.shape
-
-        assert self.num_timesteps > sample_num, 'num_timesteps must greater than sample_num'
+        assert self.num_timesteps > sample_num, 'num_timesteps must be greater than sample_num'
         sample_inter = (self.num_timesteps // sample_num)
+
         if y_0 is not None:
             y_t = default(y_t, lambda: torch.randn_like(y_0))
         else:
             y_t = default(y_t, lambda: torch.randn_like(y_cond))
-        ret_arr = y_t
 
+        # print(f"[Restoration] y_cond shape: {y_cond.shape}, y_t shape: {y_t.shape}, sample_num: {sample_num}")
+
+        ret_arr = y_t
         for i in tqdm(reversed(range(0, self.num_timesteps)), desc='sampling loop time step', total=self.num_timesteps):
             t = torch.full((b,), i, device=y_cond.device, dtype=torch.long)
             y_t, y_0_hat = self.p_sample(y_t, t, y_cond=y_cond, adjust=adjust)
             if mask is not None:
                 y_t = y_0 * (1. - mask) + mask * y_t
             if i % sample_inter == 0:
+                # print(f"[Restoration] Step {i}, y_0_hat shape: {y_0_hat.shape}")
                 ret_arr = torch.cat([ret_arr, y_0_hat], dim=0)
+
         return y_t, ret_arr
 
     def forward(self, y_0, y_cond=None, mask=None, noise=None):
-        # sampling from p(gammas)
         b, _, _, _ = y_0.shape
         t = torch.randint(1, self.num_timesteps, (b,), device=y_0.device).long()
         gamma_t1 = extract(self.gammas, t - 1, x_shape=(1, 1))
         sqrt_gamma_t2 = extract(self.gammas, t, x_shape=(1, 1))
-        sample_gammas = (sqrt_gamma_t2 - gamma_t1) * torch.rand((b, 1), device=y_0.device) + gamma_t1  # Todo: why
+        sample_gammas = (sqrt_gamma_t2 - gamma_t1) * torch.rand((b, 1), device=y_0.device) + gamma_t1
         sample_gammas = sample_gammas.view(b, -1)
+
         if noise is None:
             noise = torch.randn_like(y_0)
-        # noise = default(noise, lambda: torch.randn_like(y_0))
+
+        # print(f"[Forward] y_0 shape: {y_0.shape}, y_cond shape: {y_cond.shape}")
+        # print(f"[Forward] sample_gammas shape: {sample_gammas.shape}, noise shape: {noise.shape}")
+
         y_noisy = self.q_sample(
             y_0=y_0, sample_gammas=sample_gammas.view(-1, 1, 1, 1), noise=noise)
 
         if mask is not None:
-            noise_hat = self.denoise_fn(torch.cat([y_cond, y_noisy * mask + (1. - mask) * y_0], dim=1), sample_gammas)
+            denoise_input = torch.cat([y_cond, y_noisy * mask + (1. - mask) * y_0], dim=1)
+            noise_hat = self.denoise_fn(denoise_input, sample_gammas)
             loss = self.loss_fn(mask * noise, mask * noise_hat)
         else:
-            noise_hat = self.denoise_fn(torch.cat([y_cond, y_noisy], dim=1), sample_gammas)
+            denoise_input = torch.cat([y_cond, y_noisy], dim=1)
+            noise_hat = self.denoise_fn(denoise_input, sample_gammas)
             loss = self.loss_fn(noise_hat, noise)
+
+        # print(f"[Forward] Denoise input shape: {denoise_input.shape}, Noise hat shape: {noise_hat.shape}")
+        # print(f"[Forward] Loss: {loss.item():.6f}")
+
         return loss
 
 

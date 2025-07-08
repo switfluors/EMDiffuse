@@ -104,16 +104,135 @@ class VisualWriter():
         os.makedirs(result_path, exist_ok=True)
         result_path = os.path.join(result_path, str(self.epoch))
         os.makedirs(result_path, exist_ok=True)
-        from tifffile import imwrite
+
+        from PIL import Image
         import numpy as np
-        ''' get names and corresponding images from results[OrderedDict] '''
+        import torch
+        import matplotlib.pyplot as plt
+
+        def rescale_to_uint16(img):
+            img = img.astype(np.float32)
+            img_min = img.min()
+            img_max = img.max()
+            if img_max - img_min < 1e-8:
+                return np.zeros_like(img, dtype=np.uint16)
+            img = (img - img_min) / (img_max - img_min)
+            return (img * 65535).astype(np.uint16)
+
         try:
             names = results['name']
-            outputs = Util.postprocess(results['result'], out_type=np.uint8, min_max=(-1, 1), norm=norm)
+            outputs = results['result']
+
             for i in range(len(names)):
-                Image.fromarray(outputs[i]).save(os.path.join(result_path, names[i]))
-        except:
-            raise NotImplementedError('You must specify the context of name and result in save_current_results functions of model.')
+                img = outputs[i]
+                if isinstance(img, torch.Tensor):
+                    img = img.detach().cpu().numpy()
+
+                if img.ndim == 3 and img.shape[0] == 1:
+                    img = img.squeeze(0)
+
+                img = rescale_to_uint16(img)
+
+                # 🔬 Optional debug visualization
+                # plt.figure(figsize=(6, 3))
+                # plt.imshow(img, cmap='gray')
+                # plt.title(f"Saved: {names[i]}")
+                # plt.axis('off')
+                # plt.tight_layout()
+                # plt.show()
+
+                Image.fromarray(img).save(os.path.join(result_path, names[i]))
+
+        except Exception as e:
+            raise NotImplementedError(
+                'You must specify the context of name and result in save_current_results functions of model.'
+            ) from e
+
+    # def save_images(self, results, norm=True, percent=False):
+    #     result_path = os.path.join(self.result_dir, self.phase)
+    #     os.makedirs(result_path, exist_ok=True)
+    #     result_path = os.path.join(result_path, str(self.epoch))
+    #     os.makedirs(result_path, exist_ok=True)
+    #
+    #     from PIL import Image
+    #     import numpy as np
+    #     import torch
+    #
+    #     def denormalize_to_uint16(tensor_img):
+    #         # Expecting input in range [-1, 1]
+    #         img = tensor_img.astype(np.float32)
+    #         img = (img + 1.0) / 2.0  # Scale [-1, 1] to [0, 1]
+    #         img = np.clip(img, 0, 1)
+    #         return (img * 65535).astype(np.uint16)
+    #
+    #     try:
+    #         names = results['name']
+    #         outputs = results['result']  # raw tensors before postprocess
+    #
+    #         for i in range(len(names)):
+    #             img = outputs[i]
+    #             if isinstance(img, torch.Tensor):
+    #                 img = img.detach().cpu().numpy()
+    #
+    #             if img.ndim == 3 and img.shape[0] == 1:
+    #                 img = img.squeeze(0)  # shape: (H, W)
+    #
+    #             img = denormalize_to_uint16(img)  # uint16 image in [0, 65535]
+    #
+    #             # ✅ No transpose needed — keep as (128, 16)
+    #             Image.fromarray(img).save(os.path.join(result_path, names[i]))
+    #
+    #     except Exception as e:
+    #         raise NotImplementedError(
+    #             'You must specify the context of name and result in save_current_results functions of model.'
+    #         ) from e
+
+
+    # def save_images(self, results, norm=True, percent=False):
+    #     result_path = os.path.join(self.result_dir, self.phase)
+    #     os.makedirs(result_path, exist_ok=True)
+    #     result_path = os.path.join(result_path, str(self.epoch))
+    #     os.makedirs(result_path, exist_ok=True)
+    #
+    #     from PIL import Image
+    #     import numpy as np
+    #     import torch
+    #
+    #     def denormalize_to_uint16(tensor_img):
+    #         # Expecting input in range [-1, 1]
+    #         img = tensor_img.astype(np.float32)
+    #         img = (img + 1.0) / 2.0  # Scale [-1, 1] to [0, 1]
+    #         img = np.clip(img, 0, 1)
+    #         return (img * 65535).astype(np.uint16)
+    #
+    #     try:
+    #         names = results['name']
+    #         outputs = results['result']  # raw tensors before postprocess
+    #
+    #         for i in range(len(names)):
+    #             img = outputs[i]
+    #             if isinstance(img, torch.Tensor):
+    #                 img = img.detach().cpu().numpy()
+    #
+    #             if img.ndim == 3 and img.shape[0] == 1:
+    #                 img = img.squeeze(0)  # shape: (H, W)
+    #
+    #             img = denormalize_to_uint16(img)  # Now uint16 in [0, 65535]
+    #
+    #             # 🔁 Transpose explicitly to (128, 16) for saving
+    #             img = img.T  # if shape is (H=128, W=16), this swaps to (16, 128) to fix saved display
+    #
+    #             Image.fromarray(img).save(os.path.join(result_path, names[i]))
+    #
+    #     except Exception as e:
+    #         raise NotImplementedError(
+    #             'You must specify the context of name and result in save_current_results functions of model.'
+    #         ) from e
+    #
+    #     except Exception as e:
+    #         raise NotImplementedError(
+    #             'You must specify the context of name and result in save_current_results functions of model.'
+    #         ) from e
 
     def close(self):
         self.writer.close()

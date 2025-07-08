@@ -30,7 +30,7 @@
                 }
             },
             "dataloader":{
-                "validation_split": 0.1, // percent or number
+                "validation_split": 0.2, // percent or number
                 "args":{ // arguments to initialize train_dataloader
                     "batch_size": 3, // batch size in each gpu
                     "num_workers": 4,
@@ -109,7 +109,7 @@
                         "num_head_channels": 32,
                         "res_blocks": 2,
                         "dropout": 0.2,
-                        "image_size": 256
+                        "image_size": [128, 16]
                     },
                     "beta_schedule": {
                         "train": {

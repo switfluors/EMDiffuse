@@ -37,6 +37,7 @@ class BaseModel():
 
     def train(self):
         # val_log = self.val_step()
+        print(self.epoch, self.iter, self.opt['train']['n_epoch'], self.opt['train']['n_iter'])
         while self.epoch <= self.opt['train']['n_epoch'] and self.iter <= self.opt['train']['n_iter']:
             self.epoch += 1
             if self.opt['distributed']:
@@ -52,15 +53,11 @@ class BaseModel():
             ''' print logged informations to the screen and tensorboard ''' 
             for key, value in train_log.items():
                 self.logger.info('{:5s}: {}\t'.format(str(key), value))
-            if self.epoch < 500:
-                if self.epoch % 100 == 0:
-                    self.logger.info('Saving the self at the end of epoch {:.0f}'.format(self.epoch))
-                    self.save_everything()
-            if self.epoch % self.opt['train']['save_checkpoint_epoch'] == 0 and self.epoch > 500:
+            if self.epoch % self.opt['train']['save_checkpoint_epoch'] == 0:
                 self.logger.info('Saving the self at the end of epoch {:.0f}'.format(self.epoch))
                 self.save_everything()
 
-            if self.epoch % self.opt['train']['val_epoch'] == 0 and self.epoch > 500:
+            if self.epoch % self.opt['train']['val_epoch'] == 0:
                 self.logger.info("\n\n\n------------------------------Validation Start------------------------------")
                 if self.val_loader is None:
                     self.logger.warning('Validation stop where dataloader is None, Skip it.')
